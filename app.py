@@ -17,14 +17,12 @@ CORS(app)
 DATA_FILE = 'participants.json'
 participants = []
 
-# 水平权重映射
 LEVEL_WEIGHT = {
     '入门': 1,
     '熟练': 2,
     '精通': 3
 }
 
-# 性格顺序映射
 PERSONALITY_ORDER = ['内向', '偏内向', '中性', '偏外向', '外向']
 
 
@@ -50,7 +48,6 @@ load_data()
 
 
 def parse_theme_topic(value):
-    """解析前端传来的多选 Theme/Topic"""
     if isinstance(value, list):
         return value
     elif isinstance(value, str) and value:
@@ -60,27 +57,21 @@ def parse_theme_topic(value):
 
 
 def calculate_match_score(user_a, user_b):
-    """计算两个用户之间的匹配分"""
     score = 0
     extra_a = user_a.get('extra', {})
     extra_b = user_b.get('extra', {})
     
-    # DDL态度 (权重 15)
     if extra_a.get('deadlineAttitude') == extra_b.get('deadlineAttitude'):
         score += 15
-    
-    # 分工需求 (权重 10)
     if extra_a.get('needDivision') == extra_b.get('needDivision'):
         score += 10
     
-    # 性格多样性 (权重 20)
     pers_a = extra_a.get('personality', '中性')
     pers_b = extra_b.get('personality', '中性')
     if pers_a in PERSONALITY_ORDER and pers_b in PERSONALITY_ORDER:
         diff = abs(PERSONALITY_ORDER.index(pers_a) - PERSONALITY_ORDER.index(pers_b))
         score += diff * 4
     
-    # 技能互补 (权重 20)
     skills_a = set(user_a.get('skills', []))
     skills_b = set(user_b.get('skills', []))
     overlap = len(skills_a & skills_b)
@@ -88,29 +79,23 @@ def calculate_match_score(user_a, user_b):
     complement = total_skills - 2 * overlap
     score += complement * 2
     
-    # 协作风格匹配 (权重 15)
     styles_a = set(extra_a.get('collabStyles', []))
     styles_b = set(extra_b.get('collabStyles', []))
     common_styles = len(styles_a & styles_b)
     score += common_styles * 3
     
-    # 时间可用性重叠 (权重 10)
     times_a = set(extra_a.get('timeSlots', []))
     times_b = set(extra_b.get('timeSlots', []))
     common_times = len(times_a & times_b)
     score += common_times * 3
     
-    # 技能水平差距 (扣分)
     level_a = LEVEL_WEIGHT.get(extra_a.get('mainSkillLevel', '熟练'), 2)
     level_b = LEVEL_WEIGHT.get(extra_b.get('mainSkillLevel', '熟练'), 2)
     level_diff = abs(level_a - level_b)
     score -= level_diff * 2
     
-    # 私聊意愿 (权重 5)
     if extra_a.get('chatBeforeTeam') == extra_b.get('chatBeforeTeam') == '是':
         score += 5
-    
-    # 技能偏好 (权重 5)
     if extra_a.get('skillPreference') == extra_b.get('skillPreference'):
         score += 5
     
@@ -118,7 +103,6 @@ def calculate_match_score(user_a, user_b):
 
 
 def calculate_group_score(group):
-    """计算组内总分"""
     if len(group) < 2:
         return 0
     total = 0
@@ -129,27 +113,19 @@ def calculate_group_score(group):
 
 
 def optimize_group_members(members, target_size):
-    """
-    贪心优化组内成员排列，使组内匹配分最高
-    返回优化后的成员列表
-    """
-    if len(members) <= target_size:
-        return members
+    if not members or len(members) <= target_size:
+        return members[:target_size] if members else []
     
-    # 计算所有配对分数
     pairs = []
     for i in range(len(members)):
         for j in range(i + 1, len(members)):
-            score = calculate_match_score(members[i], members[j])
-            pairs.append((score, i, j))
+            pairs.append((calculate_match_score(members[i], members[j]), i, j))
     
     pairs.sort(reverse=True, key=lambda x: x[0])
     
     used = set()
     optimized = []
-    
-    # 贪心配成对
-    for score, i, j in pairs:
+    for _, i, j in pairs:
         if i in used or j in used:
             continue
         optimized.append(members[i])
@@ -157,7 +133,6 @@ def optimize_group_members(members, target_size):
         used.add(i)
         used.add(j)
     
-    # 添加剩余的人
     for i in range(len(members)):
         if i not in used:
             optimized.append(members[i])
@@ -166,46 +141,43 @@ def optimize_group_members(members, target_size):
 
 
 def build_groups(participants_list, min_size=6, max_size=10):
-    """
-    核心分组算法
-    第1层：按 (Theme, Topic) 硬分组
-    第2层：同 Theme 合并
-    第3层：人数足够则成组，不足则标记无法匹配
-    第4层：组内优化
-    """
-    # 为每个参与者解析 Theme 和 Topic
     for p in participants_list:
         extra = p.get('extra', {})
         p['_themes'] = parse_theme_topic(extra.get('theme', ''))
         p['_topics'] = parse_theme_topic(extra.get('topic', ''))
     
-    # 第1层：按 (Theme, Topic) 完全相同分组
     exact_groups = defaultdict(list)
     for p in participants_list:
-        # 用第一个 Theme 和第一个 Topic 作为分组键（如果多选，取第一个）
-        theme_key = p['_themes'][0] if p['_themes'] else 'unknown'
-        topic_key = p['_topics'][0] if p['_topics'] else 'unknown'
+        themes = p['_themes']
+        topics = p['_topics']
+        theme_key = themes[0] if themes else 'no_theme'
+        topic_key = topics[0] if topics else 'no_topic'
         exact_groups[(theme_key, topic_key)].append(p)
     
     final_groups = []
     unmatched = []
-    pending_merge = []  # 待合并池
+    pending_merge = []
     
-    # 第2层：处理每个精确分组
     for (theme, topic), members in exact_groups.items():
         size = len(members)
+        if theme == 'no_theme' and topic == 'no_topic':
+            for p in members:
+                unmatched.append({
+                    'name': p.get('name', '未知'),
+                    'theme': '未选择',
+                    'topic': '未选择',
+                    'reason': '未选择任何 Theme 和 Topic，无法匹配'
+                })
+            continue
         
         if size >= min_size:
-            # 人数足够，分成多个小组
             num_groups = (size + max_size - 1) // max_size
             group_size = size // num_groups
             remainder = size % num_groups
-            
             start = 0
             for i in range(num_groups):
                 current_size = group_size + (1 if i < remainder else 0)
                 group_members = members[start:start+current_size]
-                # 组内优化
                 optimized = optimize_group_members(group_members, current_size)
                 final_groups.append({
                     'theme': theme,
@@ -215,9 +187,7 @@ def build_groups(participants_list, min_size=6, max_size=10):
                     'is_merged': False
                 })
                 start += current_size
-        
         elif size >= 2:
-            # 人数不足，放入待合并池
             pending_merge.append({
                 'theme': theme,
                 'topic': topic,
@@ -225,7 +195,6 @@ def build_groups(participants_list, min_size=6, max_size=10):
                 'size': size
             })
         else:
-            # 只有1人，直接无法匹配
             for p in members:
                 unmatched.append({
                     'name': p.get('name', '未知'),
@@ -234,10 +203,10 @@ def build_groups(participants_list, min_size=6, max_size=10):
                     'reason': f'「{theme} - {topic}」方向仅1人，达不到最小组要求'
                 })
     
-    # 第3层：同 Theme 合并
     theme_merge = defaultdict(list)
     for item in pending_merge:
-        theme_merge[item['theme']].append(item)
+        if item['theme'] != 'no_theme':
+            theme_merge[item['theme']].append(item)
     
     for theme, items in theme_merge.items():
         all_members = []
@@ -248,11 +217,9 @@ def build_groups(participants_list, min_size=6, max_size=10):
         
         total = len(all_members)
         if total >= min_size:
-            # 可以合并成组
             num_groups = (total + max_size - 1) // max_size
             group_size = total // num_groups
             remainder = total % num_groups
-            
             start = 0
             for i in range(num_groups):
                 current_size = group_size + (1 if i < remainder else 0)
@@ -268,7 +235,6 @@ def build_groups(participants_list, min_size=6, max_size=10):
                 })
                 start += current_size
         else:
-            # 合并后仍然不足
             for item in items:
                 for p in item['members']:
                     unmatched.append({
@@ -354,10 +320,8 @@ def match_groups():
         if not participant_list:
             return jsonify({'error': '没有参与者数据'}), 400
         
-        # 使用完整分组算法
         groups_result, unmatched_users = build_groups(participant_list, min_size=6, max_size=10)
         
-        # 构建成功组
         success_groups = []
         for idx, g in enumerate(groups_result):
             group_score = calculate_group_score(g['members'])
